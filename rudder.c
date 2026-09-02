@@ -1,8 +1,13 @@
 #include <stdio.h>
 #include <pico/stdlib.h>
 #include "hardware/gpio.h"
-#include "ads1115.h"
-#include "registers.h"
+#include "hardware/adc.h"
+#include "hardware/dma.h"
+
+// tusb stuff
+#include "bsp/board_api.h"
+#include "tusb.h"
+#include "usb_descriptors.h"
 
 // I2C setup
 #define I2C_PORT i2c0
@@ -11,150 +16,207 @@
 const uint8_t SDA_PIN = 20;
 const uint8_t SCL_PIN = 21;
 
-// global adc struct
-struct ads1115_adc adc;
-
-// these values correspond to ADS1115 MUX register values, i.e. 0x00 = left rudder channel
-typedef enum {
-    ADC_RUDDER_LEFT = ADS1115_MUX_SINGLE_0,
-    ADC_RUDDER_RIGHT = ADS1115_MUX_SINGLE_1,
-    ADC_BRAKE_LEFT = ADS1115_MUX_SINGLE_2,
-    ADC_BRAKE_RIGHT = ADS1115_MUX_SINGLE_3,
-} ADC_CHANNEL;
-
-typedef enum {
-    CONVERTING,
-    READY
-} ADC_STATE;
-
-// ADC channel currently of interest
-volatile ADC_CHANNEL adc_channel;
-volatile ADC_STATE adc_state;
-
 // values reported by ADC
-uint16_t rudder_left;
-uint16_t rudder_right;
+uint16_t rudder;
 uint16_t brake_left;
 uint16_t brake_right;
 
-// callback for ADC complete
-void gpio_callback(uint gpio, uint32_t events) {
-    adc_state = READY;
-}
+#define RUDDER_ADC_CHANNEL      0
+#define RUDDER_ADC_GPIO         26
+#define LEFT_BRAKE_ADC_CHANNEL  1
+#define LEFT_BRAKE_ADC_GPIO     27
+#define RIGHT_BRAKE_ADC_CHANNEL 2
+#define RIGHT_BRAKE_ADC_GPIO    28
 
-#define ADC_IRQ_PIN 2
-void setup_i2c(void);
-void adc_process(void);
-ADC_CHANNEL adc_next(ADC_CHANNEL current_channel);
+// prototypes
+void hid_task(void);
+
+volatile uint16_t adc_pending;
+volatile uint16_t adc_received;
+volatile uint16_t adc_raw;
+
+void adc_isr() {
+    adc_raw = adc_fifo_get();
+    adc_received = adc_pending;
+}
 
 int main() {
     stdio_init_all();
-    setup_i2c();
 
-    printf("Rudder Hall Effect values via interrupt\n");
- 
-    // setup GPIO pin to receive conversion ready interrupt
-    gpio_init(ADC_IRQ_PIN);
-    gpio_set_irq_enabled_with_callback(ADC_IRQ_PIN, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+    printf("Pico ADC with interrupts reading\n");
 
-    // ADS1115 Config Register
-    // 15   14  13  12  11  10  9   8       7   6   5   4           3           2           1   0
-    // OS   MUX[2:0]    PGA[2:0]    MODE    DR[2:0]     COMP_MODE   COMP_POL    COMP_LAT    COMP_QUE[1:0]
+    adc_init();
 
-    // Initialise ADS1115; get initial value
-    ads1115_init(I2C_PORT, ADS1115_I2C_ADDR, &adc);
+    adc_gpio_init(RUDDER_ADC_GPIO); 
+    adc_gpio_init(LEFT_BRAKE_ADC_GPIO); 
+    adc_gpio_init(RIGHT_BRAKE_ADC_GPIO); 
 
-    // MUX: start set to first channel
-    ads1115_set_input_mux(ADC_RUDDER_LEFT, &adc);
-    // PGA: full-scale is 4.096v
-    ads1115_set_pga(ADS1115_PGA_4_096, &adc);
-    // MODE: single shot (each read is individually triggered)
-    ads1115_set_operating_mode(ADS1115_MODE_SINGLE_SHOT, &adc);
-    // DR: go real fast
-    ads1115_set_data_rate(ADS1115_RATE_860_SPS, &adc);
-    // COMP_MODE: not used when conversion ready pin active
-    // COMP_POL: set active high (trigger on falling edge)
-    ads1115_set_comparator_polarity(ADS1115_COMPARATOR_POLARITY_HI, &adc);
-    // COMP_LAT: not used when conversion ready pin active
-    // COMP_QUE: write 00 to use conversion ready pin; also sets LO_THRESH, HI_THRESH
-    ads1115_use_conversion_rdy(&adc);
-    // Write the configuration for this to have an effect.
-    ads1115_write_config(&adc);
+    adc_pending = RUDDER_ADC_GPIO;
+    adc_select_input(RUDDER_ADC_CHANNEL);
+    adc_received = 0;
 
-    printf("ADS1115 config complete: now %u\n", adc);
+	/* Write to FIFO length 1, and retain the ERR bit. */
+	adc_fifo_setup(true, false, 1, false, false);
+	adc_set_clkdiv(9600);
+	irq_set_exclusive_handler(ADC_IRQ_FIFO, adc_isr);
 
-    // set first ADC channel
-    adc_channel = ADC_RUDDER_LEFT;
+    adc_irq_set_enabled(true);
+   	irq_set_enabled(ADC_IRQ_FIFO, true);
+	adc_run(true);
 
-    // wait for OS 
-    while ((adc.config & ADS1115_STATUS_MASK) == 0);
+    // // init device stack on configured roothub port
+    tusb_rhport_init_t dev_init = {.role = TUSB_ROLE_DEVICE,
+                                   .speed = TUSB_SPEED_AUTO};
+    tusb_init(BOARD_TUD_RHPORT, &dev_init);
 
-    ads1115_begin_conversion(&adc);
+    if (board_init_after_tusb) {
+        board_init_after_tusb();
+    }
 
+    // loop
+    // get an adc value and save it to the correct value when ISR indicates it is ready
+    // service USB reports
     while(1) {
-        if (adc_state == READY) {
-            // printf("adc_state is READY, time to process\n");
-            adc_process();
+        // adc value is ready for reading, says the ISR
+        if (adc_received != 0) {
+            adc_run(false);
+            switch(adc_received) {
+                case RUDDER_ADC_GPIO:
+                    rudder = adc_raw;
+                    adc_select_input(LEFT_BRAKE_ADC_CHANNEL);
+                    adc_pending = LEFT_BRAKE_ADC_GPIO;
+                    printf("rudder gets %u\n", adc_raw);
+                    break;
+                case LEFT_BRAKE_ADC_GPIO:
+                    brake_left = adc_raw;
+                    adc_select_input(RIGHT_BRAKE_ADC_CHANNEL);
+                    adc_pending = RIGHT_BRAKE_ADC_GPIO;
+                    //printf("brake_left gets %u\n", adc_raw);
+                    break;
+                case RIGHT_BRAKE_ADC_GPIO:
+                    brake_right = adc_raw;
+                    adc_select_input(RUDDER_ADC_CHANNEL);
+                    adc_pending = RUDDER_ADC_GPIO;
+                    //printf("brake_right gets %u\n", adc_raw);
+                    break;
+            }
+            adc_received = 0;
+            adc_run(true);
+            //printf("Rudder value %u; left brake %u; right brake %u\n", rudder, brake_left, brake_right);
         }
+        tud_task();
+        hid_task();
     }
 }
 
-// Process means get the value from the ADC and then switch the channel to the next
-// sensor and begin conversion again.
-void adc_process(void) {
-    switch (adc_channel) {
-        case ADC_RUDDER_LEFT:
-            ads1115_read_last_conversion(&rudder_left, &adc);
-            // printf("RUDDER_LEFT = %u\n", rudder_left);
-            break;
-        case ADC_RUDDER_RIGHT:
-            ads1115_read_last_conversion(&rudder_right, &adc);
-            // printf("RUDDER_RIGHT = %u\n", rudder_right);
-            break;
-        case ADC_BRAKE_LEFT:
-            ads1115_read_last_conversion(&brake_left, &adc);
-            // printf("BRAKE_LEFT = %u\n", brake_left);
-            break;
-        case ADC_BRAKE_RIGHT:
-            ads1115_read_last_conversion(&brake_right, &adc);
-            // printf("BRAKE_RIGHT = %u\n", brake_right);
-            break;
-        default: 
-            // printf("adc_channel not handled in adc_process()!\n");  
-            break;
-    }
-    // printf("Advancing adc_channel now %u\n", adc_channel);  
-    adc_channel = adc_next(adc_channel);
+//--------------------------------------------------------------------+
+// Device callbacks
+//--------------------------------------------------------------------+
 
-    // set to conmverting so as not to execute adc_process until another value is ready
-    adc_state = CONVERTING;
-    // set and write new mux value and trigger conversion
+// Invoked when device is mounted
+void tud_mount_cb(void) {  }
 
-    ads1115_set_input_mux(adc_channel, &adc);
-    ads1115_write_config(&adc);
-    ads1115_begin_conversion(&adc);
+// Invoked when device is unmounted
+void tud_umount_cb(void) {  }
+
+// Invoked when usb bus is suspended
+// remote_wakeup_en : if host allow us  to perform remote wakeup
+// Within 7ms, device must draw an average of current less than 2.5 mA from bus
+void tud_suspend_cb(bool remote_wakeup_en) {
+    (void)remote_wakeup_en;
 }
 
-ADC_CHANNEL adc_next(ADC_CHANNEL current_channel) {
-    ADC_CHANNEL next_channel;
-    switch (current_channel) {
-        case ADC_RUDDER_LEFT:
-            return ADC_RUDDER_RIGHT;
-        case ADC_RUDDER_RIGHT:
-            return ADC_BRAKE_LEFT;
-        case ADC_BRAKE_LEFT:
-            return ADC_BRAKE_RIGHT;
-        case ADC_BRAKE_RIGHT:
-            return ADC_RUDDER_LEFT;
+// Invoked when usb bus is resumed
+void tud_resume_cb(void) { }
+
+//--------------------------------------------------------------------+
+// USB HID
+//--------------------------------------------------------------------+
+
+static void send_hid_report(uint8_t report_id, uint32_t btn) {
+    // skip if hid is not ready yet
+    if (!tud_hid_ready()) {
+        return;
     }
-    return next_channel;
+
+    int x = 0;
+
+    // printf("x = %d\n", x);
+    hid_gamepad_report_t report = {.x = x,
+                                   .y = 0,
+                                   .z = 0,
+                                   .rz = 0,
+                                   .rx = 0,
+                                   .ry = 0,
+                                   .hat = 0,
+                                   .buttons = 0};
+
+    tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
 }
 
-void setup_i2c() {
-    printf("Doing I2C setup port=%u, freq=%u, SDA=%d, SCL=%d\n", I2C_PORT, I2C_FREQ, SDA_PIN, SCL_PIN);
-    i2c_init(I2C_PORT, I2C_FREQ);
-    gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(SDA_PIN);
-    gpio_pull_up(SCL_PIN);
+// Every 10ms, we will sent 1 report for each HID profile (keyboard, mouse etc
+// ..) tud_hid_report_complete_cb() is used to send the next report after
+// previous one is complete
+void hid_task(void) {
+    // Poll every 10ms
+    const uint32_t interval_ms = 10;
+    static uint32_t start_ms = 0;
+
+    if (board_millis() - start_ms < interval_ms) {
+        return; // not enough time
+    }
+    start_ms += interval_ms;
+
+    uint32_t const btn = board_button_read();
+
+    // Remote wakeup
+    if (tud_suspended() && btn) {
+        // Wake up host if we are in suspend mode
+        // and REMOTE_WAKEUP feature is enabled by host
+        tud_remote_wakeup();
+    } else {
+        // Send the 1st of report chain, the rest will be sent by
+        // tud_hid_report_complete_cb()
+        //    send_hid_report(REPORT_ID_KEYBOARD, btn);
+        send_hid_report(REPORT_ID_GAMEPAD, btn);
+    }
+}
+
+// Invoked when sent REPORT successfully to host
+// Application can use this to send the next report
+// Note: For composite reports, report[0] is report ID
+void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report,
+                                uint16_t len) {
+    (void)instance;
+    (void)len;
+
+    uint8_t next_report_id = report[0] + 1u;
+
+    if (next_report_id < REPORT_ID_COUNT) {
+        send_hid_report(next_report_id, board_button_read());
+    }
+}
+
+// Invoked when received GET_REPORT control request
+// Application must fill buffer report's content and return its length.
+// Return zero will cause the stack to STALL request
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
+                               hid_report_type_t report_type, uint8_t *buffer,
+                               uint16_t reqlen) {
+    // TODO not Implemented
+    (void)instance;
+    (void)report_id;
+    (void)report_type;
+    (void)buffer;
+    (void)reqlen;
+
+    return 0;
+}
+
+// Invoked when received SET_REPORT control request or
+// received data on OUT endpoint ( Report ID = 0, Type = 0 )
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
+                           hid_report_type_t report_type, uint8_t const *buffer,
+                           uint16_t bufsize) {
+    (void)instance;
 }

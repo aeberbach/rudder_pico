@@ -28,9 +28,6 @@ set(PICO_BOARD pico2 CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-# add ads1115
-add_subdirectory(../pico-ads1115/lib ads1115)
-
 project(rudder C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
@@ -53,7 +50,8 @@ target_link_libraries(
     pico_stdlib
     pico_unique_id
     hardware_i2c
-    pico-ads1115
+    hardware_adc
+    hardware_dma
     tinyusb_device
     tinyusb_board
     )

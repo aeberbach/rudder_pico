@@ -1,222 +1,128 @@
 #include <stdio.h>
-#include <pico/stdlib.h>
-#include "hardware/gpio.h"
-#include "hardware/adc.h"
-#include "hardware/dma.h"
 
-// tusb stuff
-#include "bsp/board_api.h"
-#include "tusb.h"
-#include "usb_descriptors.h"
+#include "rudder.h"
 
-// I2C setup
-#define I2C_PORT i2c0
-#define I2C_FREQ 400000
-#define ADS1115_I2C_ADDR 0x48
-const uint8_t SDA_PIN = 20;
-const uint8_t SCL_PIN = 21;
+#define RAW_VALUE_COUNT     10
+#define ADC_MAX             4096
+#define ADC_CLAMP_MAX       4000
+#define ADC_MIN             400
+#define ADC_CLAMP_MIN       500
 
 // values reported by ADC
 uint16_t rudder;
-uint16_t brake_left;
-uint16_t brake_right;
+uint16_t rudder_raw_values[RAW_VALUE_COUNT];
+uint16_t brake_left_raw_values[RAW_VALUE_COUNT];
+uint16_t brake_right_raw_values[RAW_VALUE_COUNT];
 
-#define RUDDER_ADC_CHANNEL      0
-#define RUDDER_ADC_GPIO         26
-#define LEFT_BRAKE_ADC_CHANNEL  1
-#define LEFT_BRAKE_ADC_GPIO     27
-#define RIGHT_BRAKE_ADC_CHANNEL 2
-#define RIGHT_BRAKE_ADC_GPIO    28
+// functions for internal use
+uint16_t adc_clamped_value(uint16_t val);
+uint16_t rudder_raw_value();
+uint16_t brake_left_raw_value();
+uint16_t brake_right_raw_value();
 
-// prototypes
-void hid_task(void);
+// Public interface
 
-volatile uint16_t adc_pending;
-volatile uint16_t adc_received;
-volatile uint16_t adc_raw;
-
-void adc_isr() {
-    adc_raw = adc_fifo_get();
-    adc_received = adc_pending;
-}
-
-int main() {
-    stdio_init_all();
-
-    printf("Pico ADC with interrupts reading\n");
-
-    adc_init();
-
-    adc_gpio_init(RUDDER_ADC_GPIO); 
-    adc_gpio_init(LEFT_BRAKE_ADC_GPIO); 
-    adc_gpio_init(RIGHT_BRAKE_ADC_GPIO); 
-
-    adc_pending = RUDDER_ADC_GPIO;
-    adc_select_input(RUDDER_ADC_CHANNEL);
-    adc_received = 0;
-
-	/* Write to FIFO length 1, and retain the ERR bit. */
-	adc_fifo_setup(true, false, 1, false, false);
-	adc_set_clkdiv(9600);
-	irq_set_exclusive_handler(ADC_IRQ_FIFO, adc_isr);
-
-    adc_irq_set_enabled(true);
-   	irq_set_enabled(ADC_IRQ_FIFO, true);
-	adc_run(true);
-
-    // // init device stack on configured roothub port
-    tusb_rhport_init_t dev_init = {.role = TUSB_ROLE_DEVICE,
-                                   .speed = TUSB_SPEED_AUTO};
-    tusb_init(BOARD_TUD_RHPORT, &dev_init);
-
-    if (board_init_after_tusb) {
-        board_init_after_tusb();
-    }
-
-    // loop
-    // get an adc value and save it to the correct value when ISR indicates it is ready
-    // service USB reports
-    while(1) {
-        // adc value is ready for reading, says the ISR
-        if (adc_received != 0) {
-            adc_run(false);
-            switch(adc_received) {
-                case RUDDER_ADC_GPIO:
-                    rudder = adc_raw;
-                    adc_select_input(LEFT_BRAKE_ADC_CHANNEL);
-                    adc_pending = LEFT_BRAKE_ADC_GPIO;
-                    printf("rudder gets %u\n", adc_raw);
-                    break;
-                case LEFT_BRAKE_ADC_GPIO:
-                    brake_left = adc_raw;
-                    adc_select_input(RIGHT_BRAKE_ADC_CHANNEL);
-                    adc_pending = RIGHT_BRAKE_ADC_GPIO;
-                    //printf("brake_left gets %u\n", adc_raw);
-                    break;
-                case RIGHT_BRAKE_ADC_GPIO:
-                    brake_right = adc_raw;
-                    adc_select_input(RUDDER_ADC_CHANNEL);
-                    adc_pending = RUDDER_ADC_GPIO;
-                    //printf("brake_right gets %u\n", adc_raw);
-                    break;
-            }
-            adc_received = 0;
-            adc_run(true);
-            //printf("Rudder value %u; left brake %u; right brake %u\n", rudder, brake_left, brake_right);
-        }
-        tud_task();
-        hid_task();
+// fill the rudder raws values array with midpoint
+void rudder_init() {
+    uint16_t init_val = (ADC_MAX - ADC_MIN) / 2;
+    for(int i = 0; i < RAW_VALUE_COUNT; i++) {
+        rudder_raw_values[i] = init_val;
     }
 }
 
-//--------------------------------------------------------------------+
-// Device callbacks
-//--------------------------------------------------------------------+
+// write a new value into the rudder raw values array, moving index to
+// to position for next value. Index wraps to zero after last.
+void rudder_new_value(uint16_t val) {
+    static int index = 0;
+    uint16_t clamped_val = adc_clamped_value(val);
+    rudder_raw_values[index++] = clamped_val;
 
-// Invoked when device is mounted
-void tud_mount_cb(void) {  }
-
-// Invoked when device is unmounted
-void tud_umount_cb(void) {  }
-
-// Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us  to perform remote wakeup
-// Within 7ms, device must draw an average of current less than 2.5 mA from bus
-void tud_suspend_cb(bool remote_wakeup_en) {
-    (void)remote_wakeup_en;
-}
-
-// Invoked when usb bus is resumed
-void tud_resume_cb(void) { }
-
-//--------------------------------------------------------------------+
-// USB HID
-//--------------------------------------------------------------------+
-
-static void send_hid_report(uint8_t report_id, uint32_t btn) {
-    // skip if hid is not ready yet
-    if (!tud_hid_ready()) {
-        return;
-    }
-
-    int x = 0;
-
-    // printf("x = %d\n", x);
-    hid_gamepad_report_t report = {.x = x,
-                                   .y = 0,
-                                   .z = 0,
-                                   .rz = 0,
-                                   .rx = 0,
-                                   .ry = 0,
-                                   .hat = 0,
-                                   .buttons = 0};
-
-    tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
-}
-
-// Every 10ms, we will sent 1 report for each HID profile (keyboard, mouse etc
-// ..) tud_hid_report_complete_cb() is used to send the next report after
-// previous one is complete
-void hid_task(void) {
-    // Poll every 10ms
-    const uint32_t interval_ms = 10;
-    static uint32_t start_ms = 0;
-
-    if (board_millis() - start_ms < interval_ms) {
-        return; // not enough time
-    }
-    start_ms += interval_ms;
-
-    uint32_t const btn = board_button_read();
-
-    // Remote wakeup
-    if (tud_suspended() && btn) {
-        // Wake up host if we are in suspend mode
-        // and REMOTE_WAKEUP feature is enabled by host
-        tud_remote_wakeup();
-    } else {
-        // Send the 1st of report chain, the rest will be sent by
-        // tud_hid_report_complete_cb()
-        //    send_hid_report(REPORT_ID_KEYBOARD, btn);
-        send_hid_report(REPORT_ID_GAMEPAD, btn);
+    // wrap around to zero if the array is full
+    if (index == RAW_VALUE_COUNT) {
+        index = 0;
     }
 }
 
-// Invoked when sent REPORT successfully to host
-// Application can use this to send the next report
-// Note: For composite reports, report[0] is report ID
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report,
-                                uint16_t len) {
-    (void)instance;
-    (void)len;
+// return a rudder position value from -127..127
+int rudder_value() {
+    uint16_t raw_value = rudder_raw_value();
+    int rudder_absolute = (int)(255.0 * (float)(raw_value - ADC_MIN) / (float)(ADC_MAX - ADC_MIN));
+    int value = 127 - rudder_absolute;
+    return value;
+}
 
-    uint8_t next_report_id = report[0] + 1u;
+// write a new value into the brake left raw values array, moving index to
+// to position for next value. Index wraps to zero after last.
+void brake_left_new_value(uint16_t val) {
+    static int index = 0;
 
-    if (next_report_id < REPORT_ID_COUNT) {
-        send_hid_report(next_report_id, board_button_read());
+    uint16_t clamped_val = adc_clamped_value(val / 2);
+    brake_left_raw_values[index++] = clamped_val;
+
+    // wrap around to zero if the array is full
+    if (index == RAW_VALUE_COUNT) {
+        index = 0;
     }
 }
 
-// Invoked when received GET_REPORT control request
-// Application must fill buffer report's content and return its length.
-// Return zero will cause the stack to STALL request
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
-                               hid_report_type_t report_type, uint8_t *buffer,
-                               uint16_t reqlen) {
-    // TODO not Implemented
-    (void)instance;
-    (void)report_id;
-    (void)report_type;
-    (void)buffer;
-    (void)reqlen;
-
-    return 0;
+// return a brake position value from -127..127
+int brake_left_value() {
+    int brake_left = 127 - (255 * (brake_left_raw_value() - ADC_MIN) / (ADC_MAX - ADC_MIN));
+    if (brake_left < -127) {
+        printf("NOPE LEFT %d\n", brake_left);
+    }
+    return brake_left;
 }
 
-// Invoked when received SET_REPORT control request or
-// received data on OUT endpoint ( Report ID = 0, Type = 0 )
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
-                           hid_report_type_t report_type, uint8_t const *buffer,
-                           uint16_t bufsize) {
-    (void)instance;
+void brake_right_new_value(uint16_t val) {
+    static int index = 0;
+
+    brake_right_raw_values[index++] = adc_clamped_value(val / 2);
+
+    // wrap around to zero if the array is full
+    if (index == RAW_VALUE_COUNT) {
+        index = 0;
+    }
+}
+
+// return a brake position value from -127..127
+int brake_right_value() {
+    int brake_right = 127 - (255 * (brake_right_raw_value() - ADC_MIN) / (ADC_MAX - ADC_MIN));
+    if (brake_right < -127) {
+        printf("NOPE RIGHT %d\n", brake_right);
+    }
+    return brake_right;
+}
+
+// internal use
+
+uint16_t adc_clamped_value(uint16_t val) {
+    return MAX(ADC_CLAMP_MIN, MIN(ADC_CLAMP_MAX, val));
+}
+
+// return the average of all values in rudder raw values
+uint16_t rudder_raw_value() {
+    uint16_t sum = 0;
+    for(int i = 0; i < RAW_VALUE_COUNT; i++) {
+        sum += rudder_raw_values[i];
+    }
+    return sum/RAW_VALUE_COUNT;
+}
+
+// return the average of all values in left brake raw values
+uint16_t brake_left_raw_value() {
+    uint16_t sum = 0;
+    for(int i = 0; i < RAW_VALUE_COUNT; i++) {
+        sum += brake_left_raw_values[i];
+    }
+    return sum/RAW_VALUE_COUNT;
+}
+
+// return the average of all values in right brake raw values
+uint16_t brake_right_raw_value() {
+    uint16_t sum = 0;
+    for(int i = 0; i < RAW_VALUE_COUNT; i++) {
+        sum += brake_right_raw_values[i];
+    }
+    return sum/RAW_VALUE_COUNT;
 }

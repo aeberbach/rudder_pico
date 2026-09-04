@@ -10,11 +10,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # (note this can come from environment, CMake cache etc)
 
 # == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
-if(WIN32)
-    set(USERHOME $ENV{USERPROFILE})
-else()
-    set(USERHOME $ENV{HOME})
-endif()
+set(USERHOME $ENV{HOME})
+
 set(sdkVersion 2.3.0)
 set(toolchainVersion 15_2_Rel1)
 set(picotoolVersion 2.3.0)
@@ -37,7 +34,9 @@ pico_sdk_init()
 
 add_executable(
     rudder 
+    main.c
     rudder.c 
+    usb.c
     usb_descriptors.c 
 )
 

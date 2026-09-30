@@ -8,4 +8,4 @@ This is a very short readme because this project is already documented in other 
 
 Code can be obtained here; a longer document about how it works is on [my blog](https://aeberbach.github.io/blog/).
 
-A video about how to put all the parts together: [![Building my 3D printed rudder pedal](https://youtu.be/pj8maEB9NFw?si=HGMOKog3Wfjeg4vD)](https://www.youtube.com/watch?v=HGMOKog3Wfjeg4vD)
+A video about how to put all the parts together: [![Building my 3D printed rudder pedal](https://img.youtube.com/vi/HGMOKog3Wfjeg4vD/maxresdefault.jpg)](https://youtu.be/HGMOKog3Wfjeg4vD)

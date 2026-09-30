@@ -80,16 +80,19 @@ int main() {
             adc_run(false);
             switch(adc_received) {
                 case RUDDER_ADC_GPIO:
+                    // printf("Rudder new value %d\n", adc_raw);
                     rudder_new_value(adc_raw);
                     adc_pending = LEFT_BRAKE_ADC_GPIO;
                     adc_select_input(LEFT_BRAKE_ADC_CHANNEL);
                     break;
                 case LEFT_BRAKE_ADC_GPIO:
+                    // printf("Brake left new value %d\n", adc_raw);
                     brake_left_new_value(adc_raw);
                     adc_pending = RIGHT_BRAKE_ADC_GPIO;
                     adc_select_input(RIGHT_BRAKE_ADC_CHANNEL);
                     break;
                 case RIGHT_BRAKE_ADC_GPIO:
+                    // printf("Brake right new value %d\n", adc_raw);
                     brake_right_new_value(adc_raw);
                     adc_pending = RUDDER_ADC_GPIO;
                     adc_select_input(RUDDER_ADC_CHANNEL);

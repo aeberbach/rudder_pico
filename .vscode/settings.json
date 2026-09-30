@@ -42,5 +42,14 @@
     "raspberry-pi-pico.cmakeAutoConfigure": false,
     "raspberry-pi-pico.useCmakeTools": true,
     "raspberry-pi-pico.cmakePath": "${HOME}/.pico-sdk/cmake/v4.3.4/bin/cmake",
-    "raspberry-pi-pico.ninjaPath": "${HOME}/.pico-sdk/ninja/v1.13.2/ninja"
+    "raspberry-pi-pico.ninjaPath": "${HOME}/.pico-sdk/ninja/v1.13.2/ninja",
+    "chat.agent.enabled": false,
+    "accessibility.verbosity.inlineChat": false,
+    "inlineChat.fixDiagnostics": false,
+    "inlineChat.askInChat": false,
+    "terminal.integrated.initialHint": false,
+    "chat.checkpoints.enabled": false,
+    "chat.editRequests": "none",
+    "chat.agent.sandbox.allowAutoApprove": false,
+    "chat.agent.sandbox.allowNetwork": false
 }

@@ -1,6 +1,6 @@
 USB Rudder using Raspberry Pi Pico
 
-<img src="imgages/front.jpeg">
+<img src="images/front.jpeg">
 
 This is a very short readme because this project is already documented in other places.
 
